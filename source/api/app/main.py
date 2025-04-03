@@ -28,6 +28,20 @@ class TrainingResponse(BaseModel):
     model_id: int
 
 
+class PredictionInput(BaseModel):
+    Age: int
+    Sex: str
+    ChestPainType: str
+    RestingBP: int
+    Cholesterol: int
+    FastingBS: int
+    RestingECG: str
+    MaxHR: int
+    ExerciseAngina: str
+    Oldpeak: float
+    ST_Slope: str
+
+
 @app.post("/collect-and-train", response_model=TrainingResponse)
 async def collect_and_train():
     try:
@@ -112,6 +126,78 @@ async def collect_and_train():
             message="Dataset processado e modelo treinado com sucesso.",
             model_id=model_id
         )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+
+@app.post("/predict")
+async def predict(input_data: PredictionInput):
+    try:
+        # Conectando ao banco e retornando o ultimo modelo treinado...
+        conn = psycopg2.connect(DB_URL)
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT model_data 
+            FROM trained_models
+            ORDER BY id DESC
+            LIMIT 1;
+            """
+        )
+        row = cursor.fetchone()
+
+        if row is None:
+            raise HTTPException(status_code=404, detail="No trained model found in the database.")
+
+        # Carregando o modelo serializado
+        model_binary = row[0]
+        buffer = io.BytesIO(model_binary)
+        model = joblib.load(buffer)
+
+        cursor.close()
+        conn.close()
+
+        # Preparando input para predição
+        categorical_columns = ["Sex", "ChestPainType", "RestingECG", "ExerciseAngina", "ST_Slope"]
+
+        input_dict = input_data.dict()
+        for col in categorical_columns:
+            if col in input_dict:
+                if col == "Sex":
+                    input_dict[col] = 1 if input_dict[col].lower() == "male" else 0
+                elif col == "ChestPainType":
+                    input_dict[col] = {"TA": 0, "ATA": 1, "NAP": 2, "ASY": 3}.get(input_dict[col], -1)
+                elif col == "RestingECG":
+                    input_dict[col] = {"Normal": 0, "ST": 1, "LVH": 2}.get(input_dict[col], -1)
+                elif col == "ExerciseAngina":
+                    input_dict[col] = 1 if input_dict[col].lower() == "yes" else 0
+                elif col == "ST_Slope":
+                    input_dict[col] = {"Up": 0, "Flat": 1, "Down": 2}.get(input_dict[col], -1)
+
+        input_df = pd.DataFrame([input_dict])
+
+        # Preenchendo as colunas que não foram informadas...
+        required_columns = model.feature_names_in_
+        missing_columns = [col for col in required_columns if col not in input_df.columns]
+        for col in missing_columns:
+            input_df[col] = 0
+
+        input_df = input_df[required_columns]
+
+        # Predict
+        prediction = model.predict(input_df)
+        probability = model.predict_proba(input_df)
+
+        result = {
+            "prediction": "HeartDisease" if prediction[0] == 1 else "NoHeartDisease",
+            "probability": {
+                "NoHeartDisease": probability[0][0],
+                "HeartDisease": probability[0][1],
+            },
+        }
+
+        return result
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
