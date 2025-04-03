@@ -1,3 +1,8 @@
-fastapi[standard]>=0.113.0,<0.114.0
-pydantic>=2.7.0,<3.0.0
-requests==2.32.3
+fastapi[standard]==0.115.12
+uvicorn==0.34.0
+pandas==2.2.3
+scikit-learn==1.6.1
+sqlalchemy==2.0.40
+psycopg2-binary==2.9.10
+kagglehub==0.3.11
+joblib==1.4.2

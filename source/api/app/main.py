@@ -1,130 +1,117 @@
-from os import getenv
-from typing import Literal
+import io
 
-from fastapi import FastAPI
-from pydantic import BaseModel, validator, Field, field_validator
-import requests
-import string
-import secrets
-from datetime import datetime, timedelta
-
-from pydantic_core.core_schema import ValidationInfo
-
-# Environment variables
-dag_id = getenv("AIRFLOW_DAG_ID")
-airflow_url = getenv("AIRFLOW_URL")
-username = getenv("AIRFLOW_USERNAME")
-password = getenv("AIRFLOW_PASSWORD")
-
-# Constants for date format
-date_format = "%Y-%m-%dT%H:%M:%SZ"
-date_format_dag_id = "%Y%m%d%H%M%S"
-
-TABS = {
-    "produção": "opt_02",
-    "processamento": "opt_03",
-    "comercialização": "opt_04",
-    "importação": "opt_05",
-    "exportação": "opt_06",
-    "publicação": "opt_07",
-}
-
-
-# Request body for job start
-class StartJobRequest(BaseModel):
-    year_start: int = Field(..., ge=1990, description="The start year", alias="yearStart")
-    year_end: int = Field(..., ge=1990, description="The end year", alias="yearEnd")
-
-    @field_validator('year_end')
-    @classmethod
-    def check_years(cls, year_end, info: ValidationInfo) -> int:
-        year_start = info.data.get('year_start')
-        if year_start is not None and year_end < year_start:
-            raise ValueError('yearEnd must be greater than or equal to yearStart')
-        return year_end
-
-
-def generate_secure_random_string(length):
-    characters = string.ascii_letters + string.digits  # Use letters and digits
-    secure_random_string = ''.join(secrets.choice(characters) for _ in range(length))
-    return secure_random_string
-
+import psycopg2
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import os
+import kagglehub
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import LabelEncoder
+import joblib
 
 app = FastAPI()
 
+POSTGRES_USERNAME = os.environ.get("POSTGRES_USERNAME")
+POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD")
+POSTGRES_HOST = os.environ.get("POSTGRES_HOST")
+POSTGRES_PORT = os.environ.get("POSTGRES_PORT")
+POSTGRES_DB = os.environ.get("POSTGRES_DB")
 
-@app.get("/")
-def read_root():
-    return {"status": "OK"}
-
-
-@app.post("/jobs")
-def start_job(request: StartJobRequest):
-    date_start = datetime.now()
-
-    results = []
-
-    for year in range(request.year_start, request.year_end + 1):
-        for tab in TABS.keys():
-            request_body = {
-                "dag_run_id": f"extract_run_{date_start.strftime(date_format_dag_id)}_{generate_secure_random_string(10)}",
-                "conf": {
-                    "year": year,
-                    "tab": tab
-                },
-                "note": f"Extraction started through api, year {year}, option {tab}"
-            }
-
-            response = requests.post(f'{airflow_url}/api/v1/dags/{dag_id}/dagRuns', json=request_body,
-                                     auth=(username, password))
-
-            json_response = response.json()
-
-            if response.status_code == 200:
-                results += [{
-                    "dag_run_id": json_response['dag_run_id'],
-                    "status": json_response['state'],
-                    "params": {
-                        "year": year,
-                        "tab": tab
-                    }
-                }]
-
-    return {
-        "status": "success",
-        "results": results
-    }
+# PostgreSQL database connection string
+DB_URL = f"postgresql://{POSTGRES_USERNAME}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
 
 
-@app.get("/jobs/{dag_run_id}")
-def get_job_status(dag_run_id: str):
-    response = requests.get(f'{airflow_url}/api/v1/dags/{dag_id}/dagRuns/{dag_run_id}', auth=(username, password))
+class TrainingResponse(BaseModel):
+    message: str
+    model_id: int
 
-    if response.status_code == 200:
-        json_response = response.json()
-        print(json_response)
-        return {
-            "status": "success",
-            "result": {
-                "dag_run_id": json_response['dag_run_id'],
-                "status": json_response['state'],
-                "execution_date": json_response['execution_date'],
-                "start_date": json_response['start_date'],
-                "end_date": json_response['end_date'],
-                "note": json_response['note']
-            }
-        }
-    elif response.status_code == 404:
-        return {
-            "status": "error",
-            "message": "Dag run not found"
-        }
-    else:
-        return {
-            "status": "error",
-            "message": "Error while fetching dag run",
-            "result": {
-                "response": response.text,
-                "status_code": response.status_code
-            }
-        }
+
+@app.post("/collect-and-train", response_model=TrainingResponse)
+async def collect_and_train():
+    try:
+        # ‘Download’ do conjunto de dados a partir do Kaggle
+        csv_path = kagglehub.dataset_download(
+            handle='fedesoriano/heart-failure-prediction',
+        )
+
+        # Verificar se `csv_path` é um diretório e encontrar o arquivo CSV
+        import os
+        if os.path.isdir(csv_path):
+            # Procurar por um arquivo CSV na pasta
+            files = os.listdir(csv_path)
+            csv_file = next((f for f in files if f.endswith(".csv")), None)
+            if csv_file:
+                csv_path = os.path.join(csv_path, csv_file)
+            else:
+                raise FileNotFoundError("Nenhum arquivo CSV foi encontrado na pasta do conjunto de dados baixado.")
+
+        # Load the dataset
+        data = pd.read_csv(csv_path)
+
+        # Pré-processamento: Codificar variáveis categóricas e colunas binárias
+        categorical_columns = ["Sex", "ChestPainType", "RestingECG", "ExerciseAngina", "ST_Slope"]
+        label_encoders = {}
+
+        for col in categorical_columns:
+            le = LabelEncoder()
+            data[col] = le.fit_transform(data[col])
+            label_encoders[col] = le
+
+        # Separando features para treino
+        X = data.drop("HeartDisease", axis=1)  # Features
+        y = data["HeartDisease"]  # Target
+
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+
+        # Treinando o modelo
+        model = RandomForestClassifier(random_state=42)
+        model.fit(X_train, y_train)
+
+        # Serialização do Modelo em formato binário
+        buffer = io.BytesIO()
+        joblib.dump(model, buffer)
+        buffer.seek(0)
+
+        # Salvando o modelo treinado
+        conn = psycopg2.connect(DB_URL)
+        cursor = conn.cursor()
+
+        # Criando a tabela se não existir
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trained_models (
+                id SERIAL PRIMARY KEY,
+                model_name TEXT NOT NULL,
+                model_data BYTEA NOT NULL,
+                description TEXT
+            );
+            """
+        )
+
+        # Insere o modelo serializado
+        cursor.execute(
+            """
+            INSERT INTO trained_models (model_name, model_data, description)
+            VALUES (%s, %s, %s)
+            RETURNING id;
+            """,
+            ("HeartFailure_RandomForest", buffer.getvalue(), "Random Forest model for heart failure prediction"),
+        )
+
+        # Recupera o id do modelo
+        model_id = cursor.fetchone()[0]
+
+        # Commit das mudanças e fecha conexão
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        return TrainingResponse(
+            message="Dataset processado e modelo treinado com sucesso.",
+            model_id=model_id
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
