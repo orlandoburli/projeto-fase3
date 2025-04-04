@@ -64,7 +64,7 @@ async def collect_and_train():
         # Load the dataset
         data = pd.read_csv(csv_path)
 
-        # Pré-processamento: Codificar variáveis categóricas e colunas binárias
+        # Pré-processamento: Codificar variáveis categóricas em colunas binárias
         categorical_columns = ["Sex", "ChestPainType", "RestingECG", "ExerciseAngina", "ST_Slope"]
         label_encoders = {}
 
@@ -111,7 +111,7 @@ async def collect_and_train():
             VALUES (%s, %s, %s)
             RETURNING id;
             """,
-            ("HeartFailure_RandomForest", buffer.getvalue(), "Random Forest model for heart failure prediction"),
+            ("HeartFailure_RandomForest", buffer.getvalue(), "Modelo treinado com o conjunto de dados do Kaggle para ataque cardiaco usando Random Forest."),
         )
 
         # Recupera o id do modelo
@@ -128,7 +128,7 @@ async def collect_and_train():
         )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Um erro ocorreu: {str(e)}")
 
 @app.post("/predict")
 async def predict(input_data: PredictionInput):
@@ -148,7 +148,7 @@ async def predict(input_data: PredictionInput):
         row = cursor.fetchone()
 
         if row is None:
-            raise HTTPException(status_code=404, detail="No trained model found in the database.")
+            raise HTTPException(status_code=404, detail="Não foi encontrado nenhum modelo treinado.")
 
         # Carregando o modelo serializado
         model_binary = row[0]
@@ -200,4 +200,4 @@ async def predict(input_data: PredictionInput):
         return result
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Ocorreu um erro: {str(e)}")
